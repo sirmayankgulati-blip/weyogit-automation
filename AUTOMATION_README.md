@@ -3,7 +3,8 @@
 `telegram_video_automation.py` watches `@weyogitforyou` using the Telegram Bot
 API, sends each new text/caption summary to Gemini, creates Hindi narration
 with `edge-tts`, renders both a landscape YouTube MP4 and a vertical Instagram
-Reel MP4 with FFmpeg, and can publish the Reel with `instagrapi`.
+Reel MP4 with FFmpeg, uploads the YouTube video, and can publish the Reel with
+`instagrapi`.
 
 ## Telegram setup
 
@@ -40,6 +41,34 @@ The script saves each job under `output/<timestamp>_<telegram-update-id>/`:
 - `script_hi.txt` — generated Hindi narration
 - `source_summary.txt` — cleaned Telegram source
 - `subtitles.srt` — generated Hindi subtitles
+
+## YouTube uploads
+
+YouTube upload is enabled by default. The script automatically uses the one
+Google OAuth client-secret JSON file found in `attached_assets/`; the uploaded
+file can keep its generated filename. To select a different file explicitly:
+
+```bash
+YOUTUBE_CLIENT_SECRET_FILE=attached_assets/client_secret.json \
+python3 telegram_video_automation.py
+```
+
+On the first upload, the script prints a Google authorization URL. Open it in a
+browser, approve access to your YouTube account, then paste the complete
+redirected URL back into the running process. The browser may show a connection
+error after redirect; the URL in its address bar is still valid. The refresh
+token is cached in `state/youtube_token.json`; that runtime file is ignored by
+version control. Later uploads reuse the cached authorization automatically.
+
+Uploads are private by default. Configure the behavior with:
+
+```bash
+YOUTUBE_PRIVACY_STATUS=private   # private, unlisted, or public
+YOUTUBE_CATEGORY_ID=25
+YOUTUBE_PLAYLIST_ID=             # optional playlist ID
+```
+
+Set `YOUTUBE_UPLOAD_ENABLED=false` to render `youtube.mp4` without uploading.
 
 ## Instagram publishing
 

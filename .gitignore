@@ -54,3 +54,6 @@ state/
 *.mp3
 *.mp4
 *.srt
+
+# OAuth client secrets uploaded for local authorization
+attached_assets/client_secret*.json

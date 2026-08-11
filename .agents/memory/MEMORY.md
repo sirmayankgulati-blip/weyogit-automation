@@ -1,1 +1,2 @@
 - [Python runtime packages](python-runtime.md) — use the installable Python Tools module before adding pip dependencies
+- [Headless YouTube OAuth](youtube-oauth-headless.md) — use copy/paste callback authorization instead of relying on a local browser callback

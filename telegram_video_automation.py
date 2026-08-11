@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import time
+from urllib.parse import parse_qs, urlparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,10 +35,16 @@ from typing import Any, Iterator
 import edge_tts
 import requests
 from google import genai
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from instagrapi import Client as InstagramClient
 
 
 LOGGER = logging.getLogger("telegram-video-automation")
+YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -52,6 +59,29 @@ def require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def find_youtube_client_secret_file() -> Path:
+    configured = os.getenv("YOUTUBE_CLIENT_SECRET_FILE", "").strip()
+    if configured:
+        path = Path(configured)
+        if not path.is_file():
+            raise RuntimeError(f"YouTube client secret file does not exist: {path}")
+        return path
+
+    candidates = sorted(Path("attached_assets").glob("client_secret*.json"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise RuntimeError(
+            "No YouTube client secret JSON found. Set YOUTUBE_CLIENT_SECRET_FILE "
+            "or place client_secret.json in attached_assets/."
+        )
+    names = ", ".join(str(path) for path in candidates)
+    raise RuntimeError(
+        "Multiple YouTube client secret files found. Set "
+        f"YOUTUBE_CLIENT_SECRET_FILE explicitly. Candidates: {names}"
+    )
 
 
 @dataclass(frozen=True)
@@ -69,6 +99,12 @@ class Settings:
     output_dir: Path
     state_file: Path
     instagram_session_file: Path
+    youtube_client_secret_file: Path
+    youtube_token_file: Path
+    upload_to_youtube: bool
+    youtube_privacy_status: str
+    youtube_category_id: str
+    youtube_playlist_id: str | None
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -82,6 +118,12 @@ class Settings:
         if publish and not username:
             raise RuntimeError(
                 "PUBLISH_TO_INSTAGRAM=true requires Instagram credentials."
+            )
+        upload_to_youtube = env_bool("YOUTUBE_UPLOAD_ENABLED", True)
+        privacy_status = os.getenv("YOUTUBE_PRIVACY_STATUS", "private").strip().lower()
+        if privacy_status not in {"private", "unlisted", "public"}:
+            raise RuntimeError(
+                "YOUTUBE_PRIVACY_STATUS must be private, unlisted, or public."
             )
 
         return cls(
@@ -104,6 +146,21 @@ class Settings:
             instagram_session_file=Path(
                 os.getenv("INSTAGRAM_SESSION_FILE", "state/instagram_session.json")
             ),
+            youtube_client_secret_file=find_youtube_client_secret_file()
+            if upload_to_youtube
+            else Path(
+                os.getenv(
+                    "YOUTUBE_CLIENT_SECRET_FILE",
+                    "attached_assets/client_secret.json",
+                )
+            ),
+            youtube_token_file=Path(
+                os.getenv("YOUTUBE_TOKEN_FILE", "state/youtube_token.json")
+            ),
+            upload_to_youtube=upload_to_youtube,
+            youtube_privacy_status=privacy_status,
+            youtube_category_id=os.getenv("YOUTUBE_CATEGORY_ID", "25").strip(),
+            youtube_playlist_id=os.getenv("YOUTUBE_PLAYLIST_ID", "").strip() or None,
         )
 
 
@@ -374,6 +431,126 @@ class InstagramPublisher:
         self.client.video_upload(str(video_path), caption=caption)
 
 
+class YouTubePublisher:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.credentials = self._load_credentials()
+        self.youtube = build("youtube", "v3", credentials=self.credentials)
+
+    def _load_credentials(self) -> Credentials:
+        token_path = self.settings.youtube_token_file
+        credentials: Credentials | None = None
+        if token_path.exists():
+            try:
+                credentials = Credentials.from_authorized_user_file(
+                    str(token_path), YOUTUBE_SCOPES
+                )
+            except (ValueError, OSError) as exc:
+                LOGGER.warning("Ignoring invalid YouTube OAuth token: %s", exc)
+
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+
+        if not credentials or not credentials.valid:
+            LOGGER.info(
+                "YouTube authorization is required. A Google authorization URL "
+                "will be printed for the first upload."
+            )
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(self.settings.youtube_client_secret_file),
+                YOUTUBE_SCOPES,
+            )
+            # Google installed-app clients commonly register the loopback URI
+            # as http://localhost. Set it explicitly because this headless flow
+            # receives the redirected URL by copy/paste instead of binding a
+            # local browser callback server.
+            flow.redirect_uri = "http://localhost"
+            authorization_url, _state = flow.authorization_url(
+                access_type="offline",
+                include_granted_scopes="true",
+                prompt="consent",
+            )
+            print(
+                "\nOpen this Google authorization URL in a browser:\n"
+                f"{authorization_url}\n"
+                "After approving access, paste the complete redirected URL here.\n"
+                "The browser may show a connection error after redirect; that is okay.\n"
+                "Redirect URL: ",
+                end="",
+                flush=True,
+            )
+            redirected_url = input().strip()
+            parsed = urlparse(redirected_url)
+            query = parse_qs(parsed.query)
+            error = query.get("error", [None])[0]
+            if error:
+                raise RuntimeError(f"YouTube authorization was denied: {error}")
+            code = query.get("code", [None])[0] or redirected_url
+            if not code:
+                raise RuntimeError("No authorization code was provided.")
+            flow.fetch_token(code=code)
+            credentials = flow.credentials
+
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(credentials.to_json(), encoding="utf-8")
+        return credentials
+
+    @staticmethod
+    def _title(summary: str) -> str:
+        cleaned = clean_text(summary)
+        if not cleaned:
+            return "Hindi Summary"
+        return cleaned[:97].rstrip() + ("..." if len(cleaned) > 97 else "")
+
+    def upload(self, video_path: Path, summary: str, script: str) -> str:
+        body: dict[str, Any] = {
+            "snippet": {
+                "title": self._title(summary),
+                "description": (
+                    f"{script.strip()}\n\n"
+                    "Source: Telegram @weyogitforyou\n"
+                    "#Hindi #News #Explainer"
+                )[:5_000],
+                "categoryId": self.settings.youtube_category_id,
+                "tags": ["Hindi", "News", "Explainer"],
+            },
+            "status": {
+                "privacyStatus": self.settings.youtube_privacy_status,
+                "selfDeclaredMadeForKids": False,
+            },
+        }
+        request = self.youtube.videos().insert(
+            part="snippet,status",
+            body=body,
+            media_body=MediaFileUpload(
+                str(video_path),
+                mimetype="video/mp4",
+                chunksize=8 * 1024 * 1024,
+                resumable=True,
+            ),
+        )
+        response: dict[str, Any] | None = None
+        while response is None:
+            progress, response = request.next_chunk()
+            if progress:
+                LOGGER.info(
+                    "YouTube upload progress: %.0f%%",
+                    progress.progress() * 100,
+                )
+        video_id = str(response["id"])
+        if self.settings.youtube_playlist_id:
+            self.youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": self.settings.youtube_playlist_id,
+                        "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                    }
+                },
+            ).execute()
+        return video_id
+
+
 def caption_for_instagram(script: str) -> str:
     first_sentence = re.split(r"(?<=[।!?])\s+", script, maxsplit=1)[0]
     caption = f"{first_sentence}\n\n#Hindi #News #Explainer"
@@ -413,6 +590,13 @@ def process_summary(settings: Settings, update_id: int, summary: str) -> None:
 
     LOGGER.info("Rendering YouTube video.")
     render_video(paths["audio"], paths["subtitles"], paths["youtube"], 1920, 1080)
+    if settings.upload_to_youtube:
+        LOGGER.info("Uploading YouTube video.")
+        youtube_publisher = YouTubePublisher(settings)
+        video_id = youtube_publisher.upload(paths["youtube"], source, script)
+        LOGGER.info("YouTube upload complete: https://youtu.be/%s", video_id)
+    else:
+        LOGGER.info("YouTube uploading disabled.")
     LOGGER.info("Rendering Instagram Reel.")
     render_video(paths["audio"], paths["subtitles"], paths["instagram"], 1080, 1920)
 
