@@ -47,3 +47,10 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Telegram video automation runtime data
+output/
+state/
+*.mp3
+*.mp4
+*.srt

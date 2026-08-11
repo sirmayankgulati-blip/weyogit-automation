@@ -1,6 +1,8 @@
-# [Project name]
+# Telegram Hindi Video Automation
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Python automation that watches a Telegram channel, generates Hindi narration
+with Gemini and edge-tts, renders YouTube and Instagram videos with FFmpeg,
+and optionally publishes the Reel to Instagram.
 
 ## Run & Operate
 
@@ -22,15 +24,24 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `telegram_video_automation.py` — Telegram Bot API polling and media pipeline
+- `requirements.txt` — Python dependencies
+- `.env.example` — runtime configuration reference
+- `AUTOMATION_README.md` — setup and operating instructions
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Telegram uses Bot API `getUpdates` long polling only; no user-account client
+  libraries or Telegram API ID/hash are required.
+- Telegram update offsets are checkpointed atomically so restarts do not repeat
+  already-consumed channel posts.
+- Instagram publishing is opt-in with `PUBLISH_TO_INSTAGRAM=false` by default.
+- Each summary produces separate landscape YouTube and vertical Reel outputs.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+The automation turns new summaries from `@weyogitforyou` into Hindi narration,
+subtitled MP4 videos, and optionally an Instagram Reel.
 
 ## User preferences
 
