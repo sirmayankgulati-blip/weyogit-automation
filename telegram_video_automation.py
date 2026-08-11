@@ -45,6 +45,11 @@ from instagrapi import Client as InstagramClient
 
 LOGGER = logging.getLogger("telegram-video-automation")
 YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCRIPT_OPENING = "Dosto, WEYOGIT ke aaj ke market update mein aapka swagat hai."
+SCRIPT_CTA = (
+    "Nifty 50 Option Scalping aur PAVITRA Model updates ke liye Telegram channel "
+    "@weyogitforyou aur weyogit.com join karein."
+)
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -255,28 +260,65 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def generate_hindi_script(settings: Settings, summary: str) -> str:
-    client = genai.Client(api_key=settings.gemini_api_key)
-    prompt = f"""You write narration for a Hindi YouTube news/explainer video.
+def fallback_script(raw_text: str) -> str:
+    """Create usable narration without depending on Gemini."""
+    summary = raw_text.strip() or "Aaj ke market mein important updates saamne aaye hain."
+    return (
+        f"{SCRIPT_OPENING}\n\n"
+        "Aaj ke market summary par ek nazar daalte hain. "
+        f"{summary}\n\n"
+        "Market mein trade karne se pehle apna research aur risk management zaroor karein. "
+        f"{SCRIPT_CTA}"
+    )
 
-Convert the source summary below into a natural, engaging spoken Hindi script.
-Use Devanagari Hindi, not transliterated Hindi. Preserve names, numbers, dates,
-and facts accurately. Do not invent facts. Explain technical or English terms
-briefly in Hindi when useful. Start directly with the narration, without labels,
-stage directions, markdown, bullet points, or quotation marks. Aim for about
-60-90 seconds of speech.
+
+def enforce_script_structure(script: str) -> str:
+    """Guarantee the exact spoken opening and closing CTA in every script."""
+    body = script.strip()
+    if body.startswith(SCRIPT_OPENING):
+        body = body[len(SCRIPT_OPENING) :].lstrip(" \n:-")
+    if body.endswith(SCRIPT_CTA):
+        body = body[: -len(SCRIPT_CTA)].rstrip()
+    if not body:
+        body = "Aaj ke market update par ek nazar daalte hain."
+    return f"{SCRIPT_OPENING}\n\n{body}\n\n{SCRIPT_CTA}"
+
+
+def generate_hindi_script(settings: Settings, summary: str) -> str:
+    prompt = f"""You are a conversational Indian stock-market trader speaking to
+your audience in natural spoken Hinglish. Write the middle narration for a
+YouTube market-update video based only on the source summary below.
+
+Use Roman-script Hinglish as people speak it in India, with a confident,
+friendly trader voice. Explain the market movement clearly, preserve names,
+numbers, dates, levels, option terms, and facts accurately, and do not invent
+facts. Keep it conversational and suitable for voice narration, about 60-90
+seconds. Do not use markdown, bullet points, labels, stage directions, or
+quotation marks. Return only the middle narration body.
+
+The application will add these exact lines itself, so do not write them:
+Opening: "{SCRIPT_OPENING}"
+Closing CTA: "{SCRIPT_CTA}"
 
 Source summary:
 {summary}
 """
-    response = client.models.generate_content(
-        model=settings.gemini_model,
-        contents=prompt,
-    )
-    script = (response.text or "").strip()
-    if not script:
-        raise RuntimeError("Gemini returned an empty Hindi script.")
-    return script
+    try:
+        client = genai.Client(api_key=settings.gemini_api_key)
+        response = client.models.generate_content(
+            model=settings.gemini_model,
+            contents=prompt,
+        )
+        generated = (response.text or "").strip()
+        if not generated:
+            raise RuntimeError("Gemini returned an empty script.")
+        return enforce_script_structure(generated)
+    except Exception as exc:
+        LOGGER.warning(
+            "Gemini script generation failed; using raw-text fallback: %s",
+            exc,
+        )
+        return fallback_script(summary)
 
 
 async def synthesize_speech(text: str, voice: str, output_path: Path) -> None:
@@ -367,7 +409,12 @@ def ffmpeg_subtitle_path(path: Path) -> str:
 
 
 def render_video(
-    audio_path: Path, subtitle_path: Path, output_path: Path, width: int, height: int
+    audio_path: Path,
+    subtitle_path: Path,
+    output_path: Path,
+    width: int,
+    height: int,
+    duration: float,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     subtitle_filter = (
@@ -400,7 +447,11 @@ def render_video(
             "aac",
             "-b:a",
             "192k",
-            "-shortest",
+            # Bound the output to the exact duration measured from the
+            # generated speech audio. The color input is intentionally
+            # infinite, so -t is required instead of relying on -shortest.
+            "-t",
+            f"{duration:.3f}",
             "-movflags",
             "+faststart",
             str(output_path),
@@ -572,7 +623,8 @@ def make_job_paths(settings: Settings, update_id: int) -> dict[str, Path]:
 
 def process_summary(settings: Settings, update_id: int, summary: str) -> None:
     paths = make_job_paths(settings, update_id)
-    source = clean_text(summary)
+    raw_summary = summary.strip()
+    source = clean_text(raw_summary)
     if not source:
         LOGGER.info("Skipping update %s because its summary is empty.", update_id)
         return
@@ -580,7 +632,7 @@ def process_summary(settings: Settings, update_id: int, summary: str) -> None:
     paths["source"].write_text(source, encoding="utf-8")
 
     LOGGER.info("Generating Hindi script for Telegram update %s.", update_id)
-    script = generate_hindi_script(settings, source)
+    script = generate_hindi_script(settings, raw_summary)
     paths["script"].write_text(script, encoding="utf-8")
 
     LOGGER.info("Generating Hindi speech.")
@@ -589,7 +641,14 @@ def process_summary(settings: Settings, update_id: int, summary: str) -> None:
     write_subtitles(script, duration, paths["subtitles"])
 
     LOGGER.info("Rendering YouTube video.")
-    render_video(paths["audio"], paths["subtitles"], paths["youtube"], 1920, 1080)
+    render_video(
+        paths["audio"],
+        paths["subtitles"],
+        paths["youtube"],
+        1920,
+        1080,
+        duration,
+    )
     if settings.upload_to_youtube:
         LOGGER.info("Uploading YouTube video.")
         youtube_publisher = YouTubePublisher(settings)
@@ -598,7 +657,14 @@ def process_summary(settings: Settings, update_id: int, summary: str) -> None:
     else:
         LOGGER.info("YouTube uploading disabled.")
     LOGGER.info("Rendering Instagram Reel.")
-    render_video(paths["audio"], paths["subtitles"], paths["instagram"], 1080, 1920)
+    render_video(
+        paths["audio"],
+        paths["subtitles"],
+        paths["instagram"],
+        1080,
+        1920,
+        duration,
+    )
 
     if settings.publish_to_instagram:
         LOGGER.info("Publishing Reel to Instagram.")
