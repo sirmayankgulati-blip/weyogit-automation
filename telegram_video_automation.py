@@ -1,12 +1,6 @@
 from __future__ import annotations
-
 import os
 import imageio_ffmpeg
-
-os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
-
-
-# Set FFmpeg binary path for system commands
 os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
 
 #!/usr/bin/env python3
@@ -26,8 +20,6 @@ Run:
 By default, videos are rendered locally but not uploaded to Instagram. Set
 PUBLISH_TO_INSTAGRAM=true after testing the pipeline.
 """
-
-from __future__ import annotations
 
 import asyncio
 import json
