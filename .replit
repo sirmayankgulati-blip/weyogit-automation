@@ -1,3 +1,5 @@
+entrypoint = "python3 telegram_video_automation.py"
+
 modules = ["nodejs-24", "python-3.11"]
 
 [deployment]
