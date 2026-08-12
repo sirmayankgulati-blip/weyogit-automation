@@ -32,7 +32,17 @@ python3 -m pip install -r requirements.txt
 python3 telegram_video_automation.py
 ```
 
-The project environment already needs FFmpeg available on `PATH`.
+The script runs a lightweight Flask health server on port `8080` while the
+Telegram monitor runs in a background thread. On startup it prints the public
+Replit URL and the health endpoint:
+
+```text
+Public web URL: https://<your-replit-domain>
+Health endpoint: https://<your-replit-domain>/health
+```
+
+`/health` returns the monitor state as JSON and returns HTTP 503 if the monitor
+has failed. The project environment also needs FFmpeg available on `PATH`.
 
 The script saves each job under `output/<timestamp>_<telegram-update-id>/`:
 
@@ -41,6 +51,10 @@ The script saves each job under `output/<timestamp>_<telegram-update-id>/`:
 - `script_hi.txt` — generated Hindi narration
 - `source_summary.txt` — cleaned Telegram source
 - `subtitles.srt` — generated Hindi subtitles
+
+After every enabled upload succeeds, the generated `.mp3` and `.mp4` media
+files are deleted immediately to preserve disk space. If any enabled upload
+fails, the media files are retained for retry or inspection.
 
 ## YouTube uploads
 
@@ -78,10 +92,17 @@ Publishing is intentionally off by default:
 PUBLISH_TO_INSTAGRAM=true python3 telegram_video_automation.py
 ```
 
-The Instagram session is cached in `state/instagram_session.json` so the
-account does not need to be logged in from scratch on every processed post.
+The Instagram session is cached in local `session.json` (or the path specified
+by `INSTAGRAM_SESSION_FILE`) so the account does not need to repeat a full
+login on every processed post. The session file is ignored by version control.
 Use an Instagram account that is permitted to publish Reels, and review
 Instagram's current automation and content policies before enabling uploads.
+
+Instagram captions and YouTube descriptions include:
+
+- Telegram: https://t.me/weyogitforyou
+- Website: https://weyogit.com
+- Educational analysis only. Not financial advice.
 
 ## Restart behavior
 

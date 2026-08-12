@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import parse_qs, urlparse
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from typing import Any, Iterator
 
 import edge_tts
 import requests
+from flask import Flask, jsonify
 from google import genai
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -50,6 +52,17 @@ SCRIPT_CTA = (
     "Nifty 50 Option Scalping aur PAVITRA Model updates ke liye Telegram channel "
     "@weyogitforyou aur weyogit.com join karein."
 )
+TELEGRAM_LINK = "https://t.me/weyogitforyou"
+WEBSITE_LINK = "https://weyogit.com"
+DISCLAIMER = "Educational analysis only. Not financial advice."
+
+app = Flask(__name__)
+MONITOR_STATUS: dict[str, Any] = {
+    "state": "starting",
+    "started_at": datetime.now(timezone.utc).isoformat(),
+    "last_error": None,
+}
+MONITOR_STATUS_LOCK = threading.Lock()
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -149,7 +162,7 @@ class Settings:
             output_dir=Path(os.getenv("OUTPUT_DIR", "output")),
             state_file=Path(os.getenv("STATE_FILE", "state/telegram_state.json")),
             instagram_session_file=Path(
-                os.getenv("INSTAGRAM_SESSION_FILE", "state/instagram_session.json")
+                os.getenv("INSTAGRAM_SESSION_FILE", "session.json")
             ),
             youtube_client_secret_file=find_youtube_client_secret_file()
             if upload_to_youtube
@@ -423,6 +436,13 @@ def render_video(
         "PrimaryColour=&H00FFFFFF,OutlineColour=&H0010182B,"
         "BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=90'"
     )
+    disclaimer_filter = (
+        "drawtext="
+        f"text='{DISCLAIMER}':"
+        "fontcolor=white:fontsize=24:"
+        "x=(w-text_w)/2:y=h-text_h-24:"
+        "box=1:boxcolor=black@0.55:boxborderw=8"
+    )
     run_command(
         [
             "ffmpeg",
@@ -434,7 +454,7 @@ def render_video(
             "-i",
             str(audio_path),
             "-vf",
-            subtitle_filter,
+            f"{subtitle_filter},{disclaimer_filter}",
             "-c:v",
             "libx264",
             "-preset",
@@ -559,7 +579,10 @@ class YouTubePublisher:
                 "title": self._title(summary),
                 "description": (
                     f"{script.strip()}\n\n"
-                    "Source: Telegram @weyogitforyou\n"
+                    f"{SCRIPT_CTA}\n\n"
+                    f"Telegram channel: {TELEGRAM_LINK}\n"
+                    f"Website: {WEBSITE_LINK}\n\n"
+                    f"{DISCLAIMER}\n"
                     "#Hindi #News #Explainer"
                 )[:5_000],
                 "categoryId": self.settings.youtube_category_id,
@@ -604,8 +627,26 @@ class YouTubePublisher:
 
 def caption_for_instagram(script: str) -> str:
     first_sentence = re.split(r"(?<=[।!?])\s+", script, maxsplit=1)[0]
-    caption = f"{first_sentence}\n\n#Hindi #News #Explainer"
+    caption = (
+        f"{first_sentence}\n\n"
+        f"{SCRIPT_CTA}\n\n"
+        f"Telegram: {TELEGRAM_LINK}\n"
+        f"Website: {WEBSITE_LINK}\n\n"
+        f"{DISCLAIMER}\n"
+        "#Hindi #News #Explainer"
+    )
     return caption[:2_200]
+
+
+def cleanup_media_files(paths: dict[str, Path]) -> None:
+    """Remove generated media only after every enabled upload succeeds."""
+    for key in ("audio", "youtube", "instagram"):
+        path = paths[key]
+        try:
+            path.unlink(missing_ok=True)
+            LOGGER.info("Deleted temporary media file: %s", path)
+        except OSError as exc:
+            LOGGER.warning("Could not delete temporary media file %s: %s", path, exc)
 
 
 def make_job_paths(settings: Settings, update_id: int) -> dict[str, Path]:
@@ -649,11 +690,15 @@ def process_summary(settings: Settings, update_id: int, summary: str) -> None:
         1080,
         duration,
     )
+    youtube_uploaded = not settings.upload_to_youtube
+    instagram_uploaded = not settings.publish_to_instagram
+
     if settings.upload_to_youtube:
         LOGGER.info("Uploading YouTube video.")
         youtube_publisher = YouTubePublisher(settings)
         video_id = youtube_publisher.upload(paths["youtube"], source, script)
         LOGGER.info("YouTube upload complete: https://youtu.be/%s", video_id)
+        youtube_uploaded = True
     else:
         LOGGER.info("YouTube uploading disabled.")
     LOGGER.info("Rendering Instagram Reel.")
@@ -670,10 +715,15 @@ def process_summary(settings: Settings, update_id: int, summary: str) -> None:
         LOGGER.info("Publishing Reel to Instagram.")
         publisher = InstagramPublisher(settings)
         publisher.publish(paths["instagram"], caption_for_instagram(script))
+        instagram_uploaded = True
     else:
         LOGGER.info(
             "Instagram publishing disabled. Set PUBLISH_TO_INSTAGRAM=true to enable it."
         )
+    if youtube_uploaded and instagram_uploaded and (
+        settings.upload_to_youtube or settings.publish_to_instagram
+    ):
+        cleanup_media_files(paths)
     LOGGER.info("Completed update %s. Files are in %s.", update_id, paths["youtube"].parent)
 
 
@@ -706,18 +756,71 @@ def run_forever(settings: Settings) -> None:
             time.sleep(settings.poll_seconds)
 
 
+def public_web_url(port: int) -> str:
+    """Return the Replit-routed URL when available, otherwise localhost."""
+    domains = os.getenv("REPLIT_DOMAINS", "").strip()
+    if domains:
+        domain = domains.split(",")[0].strip()
+        if domain:
+            return f"https://{domain}"
+    dev_domain = os.getenv("REPLIT_DEV_DOMAIN", "").strip()
+    if dev_domain:
+        return f"https://{dev_domain}"
+    return f"http://127.0.0.1:{port}"
+
+
+def monitor_worker() -> None:
+    try:
+        settings = Settings.from_environment()
+        with MONITOR_STATUS_LOCK:
+            MONITOR_STATUS["state"] = "running"
+        run_forever(settings)
+    except Exception as exc:
+        with MONITOR_STATUS_LOCK:
+            MONITOR_STATUS["state"] = "failed"
+            MONITOR_STATUS["last_error"] = str(exc)
+        LOGGER.exception("Telegram monitor stopped unexpectedly.")
+
+
+@app.get("/")
+def root_status() -> Any:
+    return jsonify(
+        {
+            "service": "telegram-video-automation",
+            "status": "ok",
+            "health": "/health",
+        }
+    )
+
+
+@app.get("/health")
+def health() -> Any:
+    with MONITOR_STATUS_LOCK:
+        status = dict(MONITOR_STATUS)
+    http_status = 200 if status["state"] in {"starting", "running"} else 503
+    return jsonify(status), http_status
+
+
 def main() -> int:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    port = int(os.getenv("PORT", "8080"))
+    worker = threading.Thread(
+        target=monitor_worker,
+        name="telegram-monitor",
+        daemon=True,
+    )
+    worker.start()
+    url = public_web_url(port)
+    LOGGER.info("Health server listening on http://0.0.0.0:%s", port)
+    LOGGER.info("Public web URL: %s", url)
+    LOGGER.info("Health endpoint: %s/health", url)
     try:
-        run_forever(Settings.from_environment())
+        app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
     except KeyboardInterrupt:
-        return 0
-    except Exception as exc:
-        LOGGER.error("%s", exc)
-        return 1
+        LOGGER.info("Stopping.")
     return 0
 
 

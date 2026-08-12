@@ -57,3 +57,4 @@ state/
 
 # OAuth client secrets uploaded for local authorization
 attached_assets/client_secret*.json
+session.json
