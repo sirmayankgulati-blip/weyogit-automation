@@ -1,5 +1,9 @@
-import static_ffmpeg
-static_ffmpeg.add_paths()
+import os
+import imageio_ffmpeg
+
+# Set FFmpeg binary path for system commands
+os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
+
 #!/usr/bin/env python3
 """Turn new Telegram channel summaries into Hindi narrated videos.
 

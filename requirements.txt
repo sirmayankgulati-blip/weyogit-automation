@@ -9,4 +9,4 @@ requests>=2.32.0
 Flask
 google-auth
 sift-stack-py
-static-ffmpeg
+imageio-ffmpeg
