@@ -1,3 +1,5 @@
+import static_ffmpeg
+static_ffmpeg.add_paths()
 #!/usr/bin/env python3
 """Turn new Telegram channel summaries into Hindi narrated videos.
 
