@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 import os
 import imageio_ffmpeg
+
+os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
+
 
 # Set FFmpeg binary path for system commands
 os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
