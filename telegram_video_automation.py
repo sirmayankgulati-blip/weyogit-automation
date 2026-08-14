@@ -29,6 +29,7 @@ LOGGER = logging.getLogger("telegram-video-automation")
 # Ensure FFmpeg binary path is available
 FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 os.environ["FFMPEG_BINARY"] = FFMPEG_EXE
+os.environ["IMAGEIO_FFMPEG_EXE"] = FFMPEG_EXE
 
 # Environment Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -137,13 +138,6 @@ def upload_to_youtube(video_path: Path, title: str, description: str):
         except Exception as e:
             LOGGER.error("Failed loading YOUTUBE_TOKEN_JSON: %s", e)
 
-    token_file = Path("state/youtube_token.json")
-    if not creds and token_file.is_file():
-        try:
-            creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
-        except Exception:
-            pass
-
     if not creds or not creds.valid:
         LOGGER.warning("YouTube upload skipped -> Provide YOUTUBE_TOKEN_JSON in Render Environment to authenticate headlessly.")
         return
@@ -168,7 +162,7 @@ def upload_to_youtube(video_path: Path, title: str, description: str):
     except Exception as e:
         LOGGER.error("YouTube auto-upload error: %s", e)
 
-# Instagram Auto-Post (Session ID & Password Support)
+# Instagram Auto-Post with Direct FFmpeg Thumbnail Generation
 def post_to_instagram(video_path: Path, caption: str):
     session_id = os.getenv("INSTAGRAM_SESSION_ID", "").strip()
     user = (os.getenv("INSTAGRAM_USERNAME") or "").strip()
@@ -177,7 +171,6 @@ def post_to_instagram(video_path: Path, caption: str):
     cl = Client()
     logged_in = False
 
-    # 1. Try Session ID Login (Bypasses Cloud IP Challenges)
     if session_id:
         try:
             cl.login_by_sessionid(session_id)
@@ -186,7 +179,6 @@ def post_to_instagram(video_path: Path, caption: str):
         except Exception as e:
             LOGGER.warning("Instagram Session ID login failed: %s", e)
 
-    # 2. Fallback to password login
     if not logged_in and user and pwd:
         try:
             cl.login(user, pwd)
@@ -196,12 +188,25 @@ def post_to_instagram(video_path: Path, caption: str):
             LOGGER.error("Instagram password login failed: %s", e)
 
     if not logged_in:
-        LOGGER.warning("Instagram posting skipped -> Provide INSTAGRAM_SESSION_ID in Render Environment.")
+        LOGGER.warning("Instagram posting skipped -> Check INSTAGRAM_SESSION_ID in Render Environment.")
         return
 
     try:
-        media = cl.clip_upload(str(video_path), caption=caption)
-        LOGGER.info("Reel posted to Instagram successfully: %s", media.pk)
+        # Generate 1-frame JPG thumbnail using FFmpeg
+        thumb_path = video_path.with_suffix(".jpg")
+        subprocess.run([
+            FFMPEG_EXE, "-y",
+            "-i", str(video_path),
+            "-ss", "00:00:00.500",
+            "-vframes", "1",
+            str(thumb_path)
+        ], check=True)
+
+        media = cl.clip_upload(str(video_path), caption=caption, thumbnail=str(thumb_path))
+        LOGGER.info("Reel posted to Instagram successfully: %s", getattr(media, "code", getattr(media, "pk", "done")))
+        
+        if thumb_path.exists():
+            thumb_path.unlink()
     except Exception as e:
         LOGGER.error("Instagram clip_upload error: %s", e)
 
