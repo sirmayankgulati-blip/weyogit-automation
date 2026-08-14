@@ -18,7 +18,6 @@ from instagrapi import Client
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 
 # Configure logging
 logging.basicConfig(
@@ -49,24 +48,6 @@ app = Flask(__name__)
 @app.route("/health")
 def health_check():
     return jsonify({"status": "ok", "service": "telegram-video-automation"}), 200
-
-# YouTube Secret Resolver
-def get_youtube_secret_path() -> Path | None:
-    for env_key in ["YOUTUBE_CLIENT_SECRET_JSON", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_SECRET"]:
-        raw_secret = os.getenv(env_key, "").strip()
-        if raw_secret:
-            tmp_p = Path("/tmp/client_secret.json")
-            try:
-                tmp_p.write_text(raw_secret, encoding="utf-8")
-                return tmp_p
-            except Exception as e:
-                LOGGER.error("Failed writing /tmp/client_secret.json: %s", e)
-
-    for candidate in [Path("client_secret.json"), Path("attached_assets/client_secret.json")]:
-        if candidate.is_file():
-            return candidate
-
-    return None
 
 # Dynamic Gemini Model Cascade
 def generate_hindi_script(telegram_text: str) -> str:
@@ -143,24 +124,31 @@ def render_low_memory_video(audio_path: Path, output_path: Path, is_reel: bool =
     subprocess.run(cmd, check=True)
     return output_path
 
-# YouTube Auto-Upload Function
+# YouTube Auto-Upload (Headless Token Support)
 def upload_to_youtube(video_path: Path, title: str, description: str):
-    secret_path = get_youtube_secret_path()
-    if not secret_path or not secret_path.is_file():
-        LOGGER.warning("YouTube upload skipped -> client_secret.json not found.")
+    SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+    creds = None
+    
+    token_json = os.getenv("YOUTUBE_TOKEN_JSON", "").strip()
+    if token_json:
+        try:
+            token_info = json.loads(token_json)
+            creds = Credentials.from_authorized_user_info(token_info, SCOPES)
+        except Exception as e:
+            LOGGER.error("Failed loading YOUTUBE_TOKEN_JSON: %s", e)
+
+    token_file = Path("state/youtube_token.json")
+    if not creds and token_file.is_file():
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
+        except Exception:
+            pass
+
+    if not creds or not creds.valid:
+        LOGGER.warning("YouTube upload skipped -> Provide YOUTUBE_TOKEN_JSON in Render Environment to authenticate headlessly.")
         return
+
     try:
-        SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-        token_path = Path("state/youtube_token.json")
-        creds = None
-        if token_path.is_file():
-            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-
-        if not creds or not creds.valid:
-            flow = InstalledAppFlow.from_client_secrets_file(str(secret_path), SCOPES)
-            creds = flow.run_local_server(port=0)
-            token_path.write_text(creds.to_json())
-
         youtube = build("youtube", "v3", credentials=creds)
         body = {
             "snippet": {
@@ -180,31 +168,42 @@ def upload_to_youtube(video_path: Path, title: str, description: str):
     except Exception as e:
         LOGGER.error("YouTube auto-upload error: %s", e)
 
-# Instagram Auto-Post (Enabled by Default)
+# Instagram Auto-Post (Session ID & Password Support)
 def post_to_instagram(video_path: Path, caption: str):
-    user = (os.getenv("INSTAGRAM_USERNAME") or os.getenv("INSTAGRAM_USER") or "").strip()
-    pwd = (os.getenv("INSTAGRAM_PASSWORD") or os.getenv("INSTAGRAM_PASS") or "").strip()
-    # Default to True
-    flag = os.getenv("PUBLISH_TO_INSTAGRAM", "true").lower() not in ("false", "0", "no")
+    session_id = os.getenv("INSTAGRAM_SESSION_ID", "").strip()
+    user = (os.getenv("INSTAGRAM_USERNAME") or "").strip()
+    pwd = (os.getenv("INSTAGRAM_PASSWORD") or "").strip()
 
-    if not (user and pwd and flag):
-        LOGGER.warning(
-            "Instagram posting skipped -> Username set: %s, Password set: %s, Flag: %s",
-            bool(user), bool(pwd), flag
-        )
+    cl = Client()
+    logged_in = False
+
+    # 1. Try Session ID Login (Bypasses Cloud IP Challenges)
+    if session_id:
+        try:
+            cl.login_by_sessionid(session_id)
+            logged_in = True
+            LOGGER.info("Instagram logged in via Session ID.")
+        except Exception as e:
+            LOGGER.warning("Instagram Session ID login failed: %s", e)
+
+    # 2. Fallback to password login
+    if not logged_in and user and pwd:
+        try:
+            cl.login(user, pwd)
+            logged_in = True
+            LOGGER.info("Instagram logged in via password.")
+        except Exception as e:
+            LOGGER.error("Instagram password login failed: %s", e)
+
+    if not logged_in:
+        LOGGER.warning("Instagram posting skipped -> Provide INSTAGRAM_SESSION_ID in Render Environment.")
         return
 
     try:
-        cl = Client()
-        session_file = Path("state/instagram_session.json")
-        if session_file.is_file():
-            cl.load_settings(session_file)
-        cl.login(user, pwd)
-        cl.dump_settings(session_file)
         media = cl.clip_upload(str(video_path), caption=caption)
         LOGGER.info("Reel posted to Instagram successfully: %s", media.pk)
     except Exception as e:
-        LOGGER.error("Instagram auto-post error: %s", e)
+        LOGGER.error("Instagram clip_upload error: %s", e)
 
 # Telegram Background Polling Loop
 def telegram_worker():
