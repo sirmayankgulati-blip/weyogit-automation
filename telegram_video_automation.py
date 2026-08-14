@@ -14,7 +14,7 @@ from flask import Flask, jsonify
 import imageio_ffmpeg
 from instagrapi import Client
 
-# Google & YouTube API
+# Google & YouTube API imports
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
@@ -35,15 +35,30 @@ os.environ["FFMPEG_BINARY"] = FFMPEG_EXE
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHANNEL = "@weyogitforyou"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "").strip()
-INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "").strip()
-PUBLISH_TO_INSTAGRAM = os.getenv("PUBLISH_TO_INSTAGRAM", "true").lower() == "true"
 PORT = int(os.getenv("PORT", 10000))
 
 STATE_FILE = Path("state/last_offset.json")
 STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Startup Environment Diagnostic
+LOGGER.info(
+    "=== Environment Diagnostics at Boot ===\n"
+    "TELEGRAM_BOT_TOKEN set: %s\n"
+    "GEMINI_API_KEY set: %s\n"
+    "INSTAGRAM_USERNAME set: %s\n"
+    "INSTAGRAM_PASSWORD set: %s\n"
+    "PUBLISH_TO_INSTAGRAM: %s\n"
+    "YOUTUBE_CLIENT_SECRET_JSON set: %s\n"
+    "========================================",
+    bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+    bool(os.getenv("GEMINI_API_KEY")),
+    bool(os.getenv("INSTAGRAM_USERNAME")),
+    bool(os.getenv("INSTAGRAM_PASSWORD")),
+    os.getenv("PUBLISH_TO_INSTAGRAM"),
+    bool(os.getenv("YOUTUBE_CLIENT_SECRET_JSON") or Path("client_secret.json").exists())
+)
 
 # Flask Health Server for UptimeRobot
 app = Flask(__name__)
@@ -55,14 +70,14 @@ def health_check():
 
 # YouTube Secret Resolver
 def get_youtube_secret_path() -> Path | None:
-    raw_secret = os.getenv("YOUTUBE_CLIENT_SECRET_JSON")
-    if raw_secret and raw_secret.strip():
+    raw_secret = os.getenv("YOUTUBE_CLIENT_SECRET_JSON", "").strip()
+    if raw_secret:
         tmp_p = Path("/tmp/client_secret.json")
         try:
-            tmp_p.write_text(raw_secret.strip(), encoding="utf-8")
+            tmp_p.write_text(raw_secret, encoding="utf-8")
             return tmp_p
-        except Exception:
-            pass
+        except Exception as e:
+            LOGGER.error("Failed writing /tmp/client_secret.json: %s", e)
 
     for candidate in [Path("client_secret.json"), Path("attached_assets/client_secret.json")]:
         if candidate.is_file():
@@ -149,7 +164,7 @@ def render_low_memory_video(audio_path: Path, output_path: Path, is_reel: bool =
 def upload_to_youtube(video_path: Path, title: str, description: str):
     secret_path = get_youtube_secret_path()
     if not secret_path or not secret_path.is_file():
-        LOGGER.info("YouTube upload skipped (client_secret.json not found).")
+        LOGGER.warning("YouTube upload skipped -> client_secret.json not found on disk or environment.")
         return
     try:
         SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -182,24 +197,32 @@ def upload_to_youtube(video_path: Path, title: str, description: str):
     except Exception as e:
         LOGGER.error("YouTube auto-upload error: %s", e)
 
-# Instagram Auto-Post
+# Instagram Auto-Post Function
 def post_to_instagram(video_path: Path, caption: str):
-    if not (PUBLISH_TO_INSTAGRAM and INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD):
-        LOGGER.info("Instagram posting skipped (credentials or flag not set).")
+    user = os.getenv("INSTAGRAM_USERNAME", "").strip()
+    pwd = os.getenv("INSTAGRAM_PASSWORD", "").strip()
+    flag = os.getenv("PUBLISH_TO_INSTAGRAM", "true").lower() in ("true", "1", "yes")
+
+    if not (user and pwd and flag):
+        LOGGER.warning(
+            "Instagram posting skipped -> Username set: %s, Password set: %s, PUBLISH_TO_INSTAGRAM: %s",
+            bool(user), bool(pwd), flag
+        )
         return
+
     try:
         cl = Client()
         session_file = Path("state/instagram_session.json")
-        if session_file.exists():
+        if session_file.is_file():
             cl.load_settings(session_file)
-        cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+        cl.login(user, pwd)
         cl.dump_settings(session_file)
         media = cl.clip_upload(str(video_path), caption=caption)
         LOGGER.info("Reel posted to Instagram successfully: %s", media.pk)
     except Exception as e:
         LOGGER.error("Instagram auto-post error: %s", e)
 
-# Telegram Background Polling Loop (Publishes to Both)
+# Telegram Background Polling Loop
 def telegram_worker():
     LOGGER.info("Telegram background poller started for %s", TELEGRAM_CHANNEL)
     last_offset = 0
@@ -211,11 +234,13 @@ def telegram_worker():
 
     while True:
         try:
-            if not TELEGRAM_BOT_TOKEN:
+            token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+            if not token:
+                LOGGER.warning("TELEGRAM_BOT_TOKEN is empty in environment.")
                 time.sleep(10)
                 continue
 
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+            url = f"https://api.telegram.org/bot{token}/getUpdates"
             params = {"timeout": 10}
             if last_offset:
                 params["offset"] = last_offset + 1
