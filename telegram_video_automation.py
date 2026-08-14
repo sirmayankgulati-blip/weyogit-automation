@@ -14,6 +14,12 @@ from flask import Flask, jsonify
 import imageio_ffmpeg
 from instagrapi import Client
 
+# Google & YouTube API
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -92,6 +98,8 @@ def generate_hindi_script(telegram_text: str) -> str:
                     raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
                     LOGGER.info("Generated script using model: %s", model)
                     return re.sub(r"(\.|।)", r"\1 <break time='300ms'/>", raw_text)
+                else:
+                    LOGGER.warning("Model %s returned HTTP %s", model, res.status_code)
             except Exception as e:
                 LOGGER.warning("Model %s invocation error: %s", model, e)
 
@@ -115,7 +123,7 @@ def get_audio_duration(audio_path: Path) -> float:
     res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, check=True)
     return float(res.stdout.strip())
 
-# Clean Low-Memory Video Rendering (Zero Filter Dependencies)
+# Clean Low-Memory Video Rendering
 def render_low_memory_video(audio_path: Path, output_path: Path, is_reel: bool = False) -> Path:
     duration = get_audio_duration(audio_path)
     dimensions = "1080x1920" if is_reel else "1920x1080"
@@ -137,6 +145,43 @@ def render_low_memory_video(audio_path: Path, output_path: Path, is_reel: bool =
     subprocess.run(cmd, check=True)
     return output_path
 
+# YouTube Auto-Upload Function
+def upload_to_youtube(video_path: Path, title: str, description: str):
+    secret_path = get_youtube_secret_path()
+    if not secret_path or not secret_path.is_file():
+        LOGGER.info("YouTube upload skipped (client_secret.json not found).")
+        return
+    try:
+        SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+        token_path = Path("state/youtube_token.json")
+        creds = None
+        if token_path.is_file():
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+
+        if not creds or not creds.valid:
+            flow = InstalledAppFlow.from_client_secrets_file(str(secret_path), SCOPES)
+            creds = flow.run_local_server(port=0)
+            token_path.write_text(creds.to_json())
+
+        youtube = build("youtube", "v3", credentials=creds)
+        body = {
+            "snippet": {
+                "title": title[:100],
+                "description": description[:4500],
+                "tags": ["WEYOGIT", "Nifty50", "OptionScalping", "PAVITRAModel"],
+                "categoryId": "25"
+            },
+            "status": {
+                "privacyStatus": "public"
+            }
+        }
+        media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
+        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+        res = request.execute()
+        LOGGER.info("YouTube video uploaded successfully: https://youtu.be/%s", res.get("id"))
+    except Exception as e:
+        LOGGER.error("YouTube auto-upload error: %s", e)
+
 # Instagram Auto-Post
 def post_to_instagram(video_path: Path, caption: str):
     if not (PUBLISH_TO_INSTAGRAM and INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD):
@@ -154,7 +199,7 @@ def post_to_instagram(video_path: Path, caption: str):
     except Exception as e:
         LOGGER.error("Instagram auto-post error: %s", e)
 
-# Telegram Background Polling Loop
+# Telegram Background Polling Loop (Publishes to Both)
 def telegram_worker():
     LOGGER.info("Telegram background poller started for %s", TELEGRAM_CHANNEL)
     last_offset = 0
@@ -206,7 +251,7 @@ def telegram_worker():
                     reel_video = OUTPUT_DIR / f"reel_{update_id}.mp4"
                     render_low_memory_video(audio_file, reel_video, is_reel=True)
 
-                    # 4. Instagram Posting with Disclaimer
+                    # 4. Auto-Post to Instagram
                     caption = (
                         f"WEYOGIT Alert\n\n{text[:200]}\n\n"
                         f"Educational analysis of Nifty 50 / PAVITRA Model. Not financial advice.\n"
@@ -214,12 +259,19 @@ def telegram_worker():
                     )
                     post_to_instagram(reel_video, caption)
 
-                    # 5. Cleanup temp media
+                    # 5. Auto-Upload to YouTube
+                    upload_to_youtube(
+                        yt_video,
+                        title=f"Nifty 50 Market Update | {text[:50]} | WEYOGIT",
+                        description=f"{text}\n\nJoin Telegram: https://t.me/weyogitforyou\nWebsite: https://weyogit.com\n\nEducational analysis only."
+                    )
+
+                    # 6. Cleanup temp media
                     for p in [audio_file, yt_video, reel_video]:
                         if p.exists():
                             p.unlink()
 
-                    LOGGER.info("Completed processing update %s", update_id)
+                    LOGGER.info("Completed processing update %s across YouTube & Instagram", update_id)
 
         except Exception as e:
             LOGGER.error("Telegram worker loop error: %s", e)
