@@ -42,24 +42,6 @@ STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Startup Environment Diagnostic
-LOGGER.info(
-    "=== Environment Diagnostics at Boot ===\n"
-    "TELEGRAM_BOT_TOKEN set: %s\n"
-    "GEMINI_API_KEY set: %s\n"
-    "INSTAGRAM_USERNAME set: %s\n"
-    "INSTAGRAM_PASSWORD set: %s\n"
-    "PUBLISH_TO_INSTAGRAM: %s\n"
-    "YOUTUBE_CLIENT_SECRET_JSON set: %s\n"
-    "========================================",
-    bool(os.getenv("TELEGRAM_BOT_TOKEN")),
-    bool(os.getenv("GEMINI_API_KEY")),
-    bool(os.getenv("INSTAGRAM_USERNAME")),
-    bool(os.getenv("INSTAGRAM_PASSWORD")),
-    os.getenv("PUBLISH_TO_INSTAGRAM"),
-    bool(os.getenv("YOUTUBE_CLIENT_SECRET_JSON") or Path("client_secret.json").exists())
-)
-
 # Flask Health Server for UptimeRobot
 app = Flask(__name__)
 
@@ -70,14 +52,15 @@ def health_check():
 
 # YouTube Secret Resolver
 def get_youtube_secret_path() -> Path | None:
-    raw_secret = os.getenv("YOUTUBE_CLIENT_SECRET_JSON", "").strip()
-    if raw_secret:
-        tmp_p = Path("/tmp/client_secret.json")
-        try:
-            tmp_p.write_text(raw_secret, encoding="utf-8")
-            return tmp_p
-        except Exception as e:
-            LOGGER.error("Failed writing /tmp/client_secret.json: %s", e)
+    for env_key in ["YOUTUBE_CLIENT_SECRET_JSON", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_SECRET"]:
+        raw_secret = os.getenv(env_key, "").strip()
+        if raw_secret:
+            tmp_p = Path("/tmp/client_secret.json")
+            try:
+                tmp_p.write_text(raw_secret, encoding="utf-8")
+                return tmp_p
+            except Exception as e:
+                LOGGER.error("Failed writing /tmp/client_secret.json: %s", e)
 
     for candidate in [Path("client_secret.json"), Path("attached_assets/client_secret.json")]:
         if candidate.is_file():
@@ -164,7 +147,7 @@ def render_low_memory_video(audio_path: Path, output_path: Path, is_reel: bool =
 def upload_to_youtube(video_path: Path, title: str, description: str):
     secret_path = get_youtube_secret_path()
     if not secret_path or not secret_path.is_file():
-        LOGGER.warning("YouTube upload skipped -> client_secret.json not found on disk or environment.")
+        LOGGER.warning("YouTube upload skipped -> client_secret.json not found.")
         return
     try:
         SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -197,15 +180,16 @@ def upload_to_youtube(video_path: Path, title: str, description: str):
     except Exception as e:
         LOGGER.error("YouTube auto-upload error: %s", e)
 
-# Instagram Auto-Post Function
+# Instagram Auto-Post (Enabled by Default)
 def post_to_instagram(video_path: Path, caption: str):
-    user = os.getenv("INSTAGRAM_USERNAME", "").strip()
-    pwd = os.getenv("INSTAGRAM_PASSWORD", "").strip()
-    flag = os.getenv("PUBLISH_TO_INSTAGRAM", "true").lower() in ("true", "1", "yes")
+    user = (os.getenv("INSTAGRAM_USERNAME") or os.getenv("INSTAGRAM_USER") or "").strip()
+    pwd = (os.getenv("INSTAGRAM_PASSWORD") or os.getenv("INSTAGRAM_PASS") or "").strip()
+    # Default to True
+    flag = os.getenv("PUBLISH_TO_INSTAGRAM", "true").lower() not in ("false", "0", "no")
 
     if not (user and pwd and flag):
         LOGGER.warning(
-            "Instagram posting skipped -> Username set: %s, Password set: %s, PUBLISH_TO_INSTAGRAM: %s",
+            "Instagram posting skipped -> Username set: %s, Password set: %s, Flag: %s",
             bool(user), bool(pwd), flag
         )
         return
@@ -236,7 +220,6 @@ def telegram_worker():
         try:
             token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
             if not token:
-                LOGGER.warning("TELEGRAM_BOT_TOKEN is empty in environment.")
                 time.sleep(10)
                 continue
 
