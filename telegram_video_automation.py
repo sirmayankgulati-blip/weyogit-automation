@@ -64,11 +64,12 @@ def get_youtube_secret_path() -> Path | None:
 
     return None
 
-# Dynamic Gemini Model Cascade (Future-Proof)
+# Dynamic Gemini Model Cascade
 def generate_hindi_script(telegram_text: str) -> str:
     candidate_models = [
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro-latest",
+        "gemini-1.5-flash-002",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-pro-002",
         "gemini-2.0-flash",
         "gemini-1.5-flash",
         "gemini-1.5-pro",
@@ -91,14 +92,12 @@ def generate_hindi_script(telegram_text: str) -> str:
                     raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
                     LOGGER.info("Generated script using model: %s", model)
                     return re.sub(r"(\.|।)", r"\1 <break time='300ms'/>", raw_text)
-                else:
-                    LOGGER.warning("Model %s returned HTTP %s", model, res.status_code)
             except Exception as e:
                 LOGGER.warning("Model %s invocation error: %s", model, e)
 
     LOGGER.info("Using deterministic fallback script.")
     return (
-        f"Dosto, WEYOGIT Market Update mein swagat hai. "
+        f"Dosto, WEYOGIT Market Update mein aapka swagat hai. "
         f"{telegram_text} "
         f"Live Nifty 50 aur PAVITRA Model scalping updates ke liye Telegram channel @weyogitforyou aur weyogit.com visit karein."
     )
@@ -116,7 +115,7 @@ def get_audio_duration(audio_path: Path) -> float:
     res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, check=True)
     return float(res.stdout.strip())
 
-# Low-Memory Video Rendering (Corrected Dimensions Syntax)
+# Clean Low-Memory Video Rendering (Zero Filter Dependencies)
 def render_low_memory_video(audio_path: Path, output_path: Path, is_reel: bool = False) -> Path:
     duration = get_audio_duration(audio_path)
     dimensions = "1080x1920" if is_reel else "1920x1080"
@@ -125,8 +124,6 @@ def render_low_memory_video(audio_path: Path, output_path: Path, is_reel: bool =
         FFMPEG_EXE, "-y",
         "-f", "lavfi", "-i", f"color=c=0x111625:s={dimensions}:r=25",
         "-i", str(audio_path),
-        "-vf", "drawtext=text='WEYOGIT Market Briefing':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=100,"
-               "drawtext=text='Educational analysis only. Not financial advice.':fontcolor=gray:fontsize=24:x=(w-text_w)/2:y=h-60",
         "-t", str(duration),
         "-c:v", "libx264",
         "-preset", "ultrafast",
@@ -209,8 +206,13 @@ def telegram_worker():
                     reel_video = OUTPUT_DIR / f"reel_{update_id}.mp4"
                     render_low_memory_video(audio_file, reel_video, is_reel=True)
 
-                    # 4. Instagram Posting
-                    post_to_instagram(reel_video, f"WEYOGIT Alert\n\n{text[:200]}\n\n#WEYOGIT #Nifty50 #PAVITRAModel")
+                    # 4. Instagram Posting with Disclaimer
+                    caption = (
+                        f"WEYOGIT Alert\n\n{text[:200]}\n\n"
+                        f"Educational analysis of Nifty 50 / PAVITRA Model. Not financial advice.\n"
+                        f"#WEYOGIT #Nifty50 #PAVITRAModel"
+                    )
+                    post_to_instagram(reel_video, caption)
 
                     # 5. Cleanup temp media
                     for p in [audio_file, yt_video, reel_video]:
@@ -230,4 +232,3 @@ poller_thread.start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
-
