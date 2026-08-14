@@ -82,27 +82,23 @@ def require_env(name: str) -> str:
     return value
 
 
-def find_youtube_client_secret_file() -> Path:
-    configured = os.getenv("YOUTUBE_CLIENT_SECRET_FILE", "").strip()
-    if configured:
-        path = Path(configured)
-        if not path.is_file():
-            raise RuntimeError(f"YouTube client secret file does not exist: {path}")
-        return path
+def find_youtube_client_secret_file() -> Path | None:
+    raw_secret = os.getenv("YOUTUBE_CLIENT_SECRET_JSON")
+    if raw_secret:
+        p = Path("/tmp/client_secret.json")
+        p.write_text(raw_secret, encoding="utf-8")
+        return p
 
-    candidates = sorted(Path("attached_assets").glob("client_secret*.json"))
-    if len(candidates) == 1:
-        return candidates[0]
-    if not candidates:
-        raise RuntimeError(
-            "No YouTube client secret JSON found. Set YOUTUBE_CLIENT_SECRET_FILE "
-            "or place client_secret.json in attached_assets/."
-        )
-    names = ", ".join(str(path) for path in candidates)
-    raise RuntimeError(
-        "Multiple YouTube client secret files found. Set "
-        f"YOUTUBE_CLIENT_SECRET_FILE explicitly. Candidates: {names}"
-    )
+    env_path = os.getenv("YOUTUBE_CLIENT_SECRET_FILE")
+    if env_path and Path(env_path).is_file():
+        return Path(env_path)
+
+    for candidate in [Path("client_secret.json"), Path("attached_assets/client_secret.json")]:
+        if candidate.is_file():
+            return candidate
+
+    LOGGER.warning("No YouTube client secret found. Continuing without YouTube uploads.")
+    return None
 
 
 @dataclass(frozen=True)
